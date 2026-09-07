@@ -187,9 +187,13 @@ class SCFAClient:
         commander_id = commander.id if isinstance(commander, Unit) else int(commander)
         self.buffer.add(OverchargeCommand(commander=commander_id, target=target))
 
-    def set_game_speed(self, speed: int) -> None:
+    def set_speed(self, speed: int) -> None:
         """Adjusts in-game simulation speed (-10 to +10)."""
         self.buffer.add(SetSpeedCommand(speed=speed))
+
+    def set_game_speed(self, speed: int) -> None:
+        """Adjusts in-game simulation speed (-10 to +10)."""
+        self.set_speed(speed)
 
     def set_army(self, army_index: int) -> None:
         """Switches controlled bot army (e.g. 1, 2)."""
