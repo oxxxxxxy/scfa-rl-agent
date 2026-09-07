@@ -20,6 +20,7 @@ from .commands import (
     StopCommand,
     UpgradeCommand,
 )
+from .bot import BotConfig, RuleBasedBot
 from .ipc import SCFAIPC
 from .launcher import GameLauncher
 from .state import EconomyState, GameState, MassSpot, ResourceRate, Unit
@@ -50,4 +51,6 @@ __all__ = [
     "ReclaimCommand",
     "OverchargeCommand",
     "SetSpeedCommand",
+    "RuleBasedBot",
+    "BotConfig",
 ]

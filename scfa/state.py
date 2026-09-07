@@ -124,6 +124,25 @@ class Unit:
         return "EXPERIMENTAL" in self.tags
 
     @property
+    def is_mex(self) -> bool:
+        return "MASSEXTRACTION" in self.tags
+
+    @property
+    def is_power(self) -> bool:
+        return "ENERGYPRODUCTION" in self.tags
+
+    @property
+    def is_defense(self) -> bool:
+        return "DEFENSE" in self.tags
+
+    @property
+    def is_scout(self) -> bool:
+        return (
+            ("INTELLIGENCE" in self.tags or "SCOUT" in self.tags or "scout" in self.blueprint_id.lower())
+            and not self.is_structure
+        )
+
+    @property
     def is_combat(self) -> bool:
         return (
             ("DIRECTFIRE" in self.tags or "ANTIAIR" in self.tags)
@@ -317,6 +336,22 @@ class GameState:
     def get_experimentals(self) -> List[Unit]:
         """Returns all experimental units and structures."""
         return [u for u in self.units.values() if u.is_experimental and u.is_alive]
+
+    def get_mexes(self) -> List[Unit]:
+        """Returns all friendly mass extractor structures."""
+        return [u for u in self.units.values() if u.is_mex and u.is_alive]
+
+    def get_power_generators(self) -> List[Unit]:
+        """Returns all friendly energy generation structures."""
+        return [u for u in self.units.values() if u.is_power and u.is_alive]
+
+    def get_defenses(self) -> List[Unit]:
+        """Returns all friendly static defense structures."""
+        return [u for u in self.units.values() if u.is_defense and u.is_alive]
+
+    def get_scouts(self) -> List[Unit]:
+        """Returns all friendly scout units."""
+        return [u for u in self.units.values() if u.is_scout and u.is_alive]
 
     def get_radars(self) -> List[Unit]:
         """Returns all radar, sonar, and omni sensory structures."""

@@ -40,7 +40,7 @@ class SCFAClient:
         self.buffer = CommandBuffer()
         self._last_state: Optional[GameState] = None
 
-    def get_state(self, timeout_sec: float = 10.0) -> GameState:
+    def get_state(self, timeout_sec: Optional[float] = 10.0) -> GameState:
         """
         Retrieves the latest complete game state snapshot from the simulation.
         Blocks until the in-game loop emits a new state or timeout occurs.
@@ -54,7 +54,7 @@ class SCFAClient:
         self._last_state = GameState.from_dict(raw_data, client=self)
         return self._last_state
 
-    def step(self, seconds: float = 1.0, timeout_sec: float = 10.0) -> GameState:
+    def step(self, seconds: float = 1.0, timeout_sec: Optional[float] = 10.0) -> GameState:
         """
         Flushes all buffered commands to the game and advances the simulation.
         Returns the new GameState after the step.
@@ -195,6 +195,12 @@ class SCFAClient:
         """Switches controlled bot army (e.g. 1, 2)."""
         self.buffer.add(SetArmyCommand(army=army_index))
 
+    def configure(self, army: int = 1, speed: int = 10, disable_ai: bool = True) -> None:
+        """Configures the in-game bridge parameters via config file and live command buffer."""
+        self.ipc.write_config(army=army, speed=speed, disable_ai=disable_ai)
+        self.set_army(army)
+        self.set_speed(speed)
+
 
 class GameSession:
     """
@@ -222,6 +228,7 @@ class GameSession:
     def start(self, wait_initial_state: bool = True, timeout_sec: float = 30.0) -> SCFAClient:
         """Starts the game process and returns the connected SCFAClient."""
         self.ipc.clean()
+        self.ipc.write_config(army=1, speed=self.game_speed, disable_ai=False)
         self.launcher.launch(
             map_name=self.map_name,
             faction=self.faction,

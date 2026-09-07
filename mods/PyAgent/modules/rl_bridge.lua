@@ -7,13 +7,16 @@ local AIUtils = import('/lua/ai/aiutilities.lua')
 _G.PyAgent_Bridge = {
     Running = false,
     StepId = 0,
-    ArmyIndex = 1, -- Default to Army 1 (can be switched via command)
+    ArmyIndex = 1, -- Default to Army 1 (can be switched via command or config)
+    GameSpeed = 10,
+    DisableAI = true,
     SHM_DIR = "Z:/dev/shm/",
     STATE_FILE = "Z:/dev/shm/scfa_state.json",
     STATE_READY = "Z:/dev/shm/scfa_state.ready",
     CMD_FILE = "Z:/dev/shm/scfa_commands.json",
     CMD_READY = "Z:/dev/shm/scfa_commands.ready",
-    STOP_FILE = "Z:/dev/shm/scfa_stop.flag"
+    STOP_FILE = "Z:/dev/shm/scfa_stop.flag",
+    CONFIG_FILE = "Z:/dev/shm/scfa_config.json"
 }
 
 -- Fast JSON Serializer for Lua
@@ -345,6 +348,42 @@ local function ExecuteCommand(cmd)
     -- Switch controlled army
     elseif ctype == "set_army" and cmd.army then
         _G.PyAgent_Bridge.ArmyIndex = tonumber(cmd.army)
+        local newBrain = GetArmyBrain(_G.PyAgent_Bridge.ArmyIndex)
+        if newBrain and _G.PyAgent_Bridge.DisableAI ~= false then
+            DisableInternalAI(newBrain)
+        end
+    end
+end
+
+-- Helper to disable game internal AI script threads for controlled army
+function DisableInternalAI(aiBrain)
+    if not aiBrain then return end
+    if aiBrain.EvaluateThread then
+        KillThread(aiBrain.EvaluateThread)
+        aiBrain.EvaluateThread = nil
+    end
+    if aiBrain.ExecuteThread then
+        KillThread(aiBrain.ExecuteThread)
+        aiBrain.ExecuteThread = nil
+    end
+    aiBrain.RepeatExecution = false
+    LOG("PyAgent: Internal AI disabled for army " .. tostring(aiBrain:GetArmyIndex()))
+end
+
+-- Helper to read external config if present
+local function LoadConfig(self)
+    if FileExists(self.CONFIG_FILE) then
+        local cfgStr = ReadFile(self.CONFIG_FILE)
+        if cfgStr then
+            local arm = string.match(cfgStr, '"army"%s*:%s*(%d+)')
+            if arm then self.ArmyIndex = tonumber(arm) end
+            local spd = string.match(cfgStr, '"speed"%s*:%s*(%-?%d+)')
+            if spd then self.GameSpeed = tonumber(spd) end
+            local dis = string.match(cfgStr, '"disable_ai"%s*:%s*(%a+)')
+            if dis == "false" then self.DisableAI = false end
+            LOG(string.format("PyAgent: Config loaded. Army=%d, Speed=%s, DisableAI=%s",
+                self.ArmyIndex, tostring(self.GameSpeed), tostring(self.DisableAI)))
+        end
     end
 end
 
@@ -376,7 +415,7 @@ local function ExecuteCommandsJson(str)
         local cnt = string.match(obj, '"count"%s*:%s*(%d+)')
         if cnt then cmd.count = tonumber(cnt) end
 
-        local spd = string.match(obj, '"speed"%s*:%s*(%d+)')
+        local spd = string.match(obj, '"speed"%s*:%s*(%-?%d+)')
         if spd then cmd.speed = tonumber(spd) end
 
         local arm = string.match(obj, '"army"%s*:%s*(%d+)')
@@ -404,13 +443,20 @@ function _G.PyAgent_Bridge.Start()
     if _G.PyAgent_Bridge.Running then return end
     _G.PyAgent_Bridge.Running = true
 
-    LOG("PyAgent: Full API Bridge starting...")
-    SetGameSpeed(10)
-
     local self = _G.PyAgent_Bridge
+    LoadConfig(self)
+
+    LOG(string.format("PyAgent: Full API Bridge starting on Army %d, Speed %d...", self.ArmyIndex, self.GameSpeed))
+    SetGameSpeed(self.GameSpeed)
 
     -- Wait 30 ticks for ACU landing animation to finish
     WaitTicks(30)
+
+    -- Disable internal game AI on controlled army
+    local controlledBrain = GetArmyBrain(self.ArmyIndex)
+    if controlledBrain and self.DisableAI ~= false then
+        DisableInternalAI(controlledBrain)
+    end
 
     while not IsGameOver() and not FileExists(self.STOP_FILE) do
         self.StepId = self.StepId + 1

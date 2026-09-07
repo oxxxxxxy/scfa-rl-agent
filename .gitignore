@@ -9,6 +9,9 @@ logs/
 env/
 venv/
 *.tmp
+*.log
 scfa_obs.json*
 scfa_action.json*
 scfa_stop.flag*
+scfa_*.json*
+scfa_*.ready*
