@@ -1,34 +1,80 @@
--- PyAgent Full Programmatic API Bridge for Supreme Commander: Forged Alliance
--- Ultra-low latency IPC via Linux Shared Memory (/dev/shm)
+-- PyAgent Autonomous Mission & IPC Bridge for Supreme Commander: Forged Alliance
+-- Faction-aware, robust zero-dependency in-engine coordinator
 
 local ScenarioUtils = import('/lua/sim/ScenarioUtilities.lua')
-local AIUtils = import('/lua/ai/aiutilities.lua')
 
 _G.PyAgent_Bridge = {
     Running = false,
     StepId = 0,
-    ArmyIndex = 1, -- Default to Army 1 (can be switched via command or config)
-    GameSpeed = 10,
+    ArmyIndex = 1,
+    GameSpeed = 0,
     DisableAI = true,
-    SHM_DIR = "Z:/dev/shm/",
-    STATE_FILE = "Z:/dev/shm/scfa_state.json",
-    STATE_READY = "Z:/dev/shm/scfa_state.ready",
-    CMD_FILE = "Z:/dev/shm/scfa_commands.json",
-    CMD_READY = "Z:/dev/shm/scfa_commands.ready",
-    STOP_FILE = "Z:/dev/shm/scfa_stop.flag",
-    CONFIG_FILE = "Z:/dev/shm/scfa_config.json"
+    TickInterval = 10,
+    CMD_PATH = '/mods/pyagent/_pyagent_cmd.lua',
+    LastCmdSeq = 0,
 }
 
--- Fast JSON Serializer for Lua
+-- Blueprint mapping per faction
+local FACTION_BLUEPRINTS = {
+    -- Cybran
+    [3] = {
+        factory = 'urb0101',
+        mex = 'urb1103',
+        pgen = 'urb1101',
+        engineer = 'url0105',
+        pd = 'urb2101',
+        aa = 'urb2104',
+        wall = 'urb5101'
+    },
+    -- UEF
+    [1] = {
+        factory = 'ueb0101',
+        mex = 'ueb1103',
+        pgen = 'ueb1101',
+        engineer = 'uel0105',
+        pd = 'ueb2101',
+        aa = 'ueb2104',
+        wall = 'ueb5101'
+    },
+    -- Aeon
+    [2] = {
+        factory = 'uab0101',
+        mex = 'uab1103',
+        pgen = 'uab1101',
+        engineer = 'ual0105',
+        pd = 'uab2101',
+        aa = 'uab2104',
+        wall = 'uab5101'
+    },
+    -- Seraphim
+    [4] = {
+        factory = 'xsb0101',
+        mex = 'xsb1103',
+        pgen = 'xsb1101',
+        engineer = 'xsl0105',
+        pd = 'xsb2101',
+        aa = 'xsb2104',
+        wall = 'xsb5101'
+    }
+}
+
+-- ============================================================
+-- Fast JSON Serializer for Game State Logging
+-- ============================================================
 local function SerializeJson(val)
     local t = type(val)
     if t == 'number' then
-        if val ~= val then return "0" end -- NaN check
-        if val == math.huge then return "999999" end
-        if val == -math.huge then return "-999999" end
+        if val ~= val then return "0" end
+        if val > 999999999 then return "999999" end
+        if val < -999999999 then return "-999999" end
         return string.format("%.2f", val)
     elseif t == 'string' then
-        return string.format("%q", val)
+        local s = val
+        s = string.gsub(s, '\\', '\\\\')
+        s = string.gsub(s, '"', '\\"')
+        s = string.gsub(s, '\n', '\\n')
+        s = string.gsub(s, '\r', '\\r')
+        return '"' .. s .. '"'
     elseif t == 'boolean' then
         return val and "true" or "false"
     elseif t == 'table' then
@@ -49,7 +95,7 @@ local function SerializeJson(val)
             return "[" .. table.concat(parts, ",") .. "]"
         else
             for k, v in pairs(val) do
-                table.insert(parts, string.format("%q:%s", tostring(k), SerializeJson(v)))
+                table.insert(parts, '"' .. tostring(k) .. '":' .. SerializeJson(v))
             end
             return "{" .. table.concat(parts, ",") .. "}"
         end
@@ -58,33 +104,9 @@ local function SerializeJson(val)
     end
 end
 
-local function FileExists(path)
-    local f = io.open(path, "r")
-    if f then
-        f:close()
-        return true
-    end
-    return false
-end
-
-local function ReadFile(path)
-    local f = io.open(path, "r")
-    if not f then return nil end
-    local content = f:read("*all")
-    f:close()
-    return content
-end
-
-local function WriteFile(path, content)
-    local f = io.open(path, "w")
-    if not f then return false end
-    f:write(content)
-    f:flush()
-    f:close()
-    return true
-end
-
+-- ============================================================
 -- Category tags helper
+-- ============================================================
 local function GetUnitTags(unit)
     local tags = {}
     if EntityCategoryContains(categories.COMMAND, unit) then table.insert(tags, "COMMANDER") end
@@ -98,60 +120,36 @@ local function GetUnitTags(unit)
     if EntityCategoryContains(categories.MASSEXTRACTION, unit) then table.insert(tags, "MASSEXTRACTION") end
     if EntityCategoryContains(categories.ENERGYPRODUCTION, unit) then table.insert(tags, "ENERGYPRODUCTION") end
     if EntityCategoryContains(categories.DIRECTFIRE, unit) then table.insert(tags, "DIRECTFIRE") end
-    if EntityCategoryContains(categories.INDIRECTFIRE, unit) then table.insert(tags, "INDIRECTFIRE") end
     if EntityCategoryContains(categories.ANTIAIR, unit) then table.insert(tags, "ANTIAIR") end
     if EntityCategoryContains(categories.DEFENSE, unit) then table.insert(tags, "DEFENSE") end
-    if EntityCategoryContains(categories.RADAR, unit) then table.insert(tags, "RADAR") end
-    if EntityCategoryContains(categories.SONAR, unit) then table.insert(tags, "SONAR") end
-    if EntityCategoryContains(categories.OMNI, unit) then table.insert(tags, "OMNI") end
-    if EntityCategoryContains(categories.SHIELD, unit) then table.insert(tags, "SHIELD") end
-    if EntityCategoryContains(categories.TECH1, unit) then table.insert(tags, "TECH1") end
-    if EntityCategoryContains(categories.TECH2, unit) then table.insert(tags, "TECH2") end
-    if EntityCategoryContains(categories.TECH3, unit) then table.insert(tags, "TECH3") end
-    if EntityCategoryContains(categories.EXPERIMENTAL, unit) then table.insert(tags, "EXPERIMENTAL") end
     return tags
 end
 
--- Collect comprehensive game state
-local function CollectFullState(aiBrain)
-    local mapWidth = (ScenarioInfo.size and ScenarioInfo.size[1]) or 512
-    local mapHeight = (ScenarioInfo.size and ScenarioInfo.size[2]) or 512
-
+-- ============================================================
+-- Collect State Snapshot
+-- ============================================================
+local function CollectState(aiBrain)
     local state = {
         step = _G.PyAgent_Bridge.StepId,
         army_index = _G.PyAgent_Bridge.ArmyIndex,
         game_time = GetGameTimeSeconds(),
         game_tick = GetGameTick(),
-        game_speed = GetGameSpeed(),
         is_over = IsGameOver(),
-        map = {
-            width = mapWidth,
-            height = mapHeight
-        },
         economy = {
             mass = {
                 stored = aiBrain:GetEconomyStored('MASS'),
-                capacity = aiBrain:GetEconomyStorage('MASS'),
                 income = aiBrain:GetEconomyIncome('MASS'),
-                usage = aiBrain:GetEconomyUsage('MASS'),
-                requested = aiBrain:GetEconomyRequested('MASS'),
-                trend = aiBrain:GetEconomyTrend('MASS')
+                usage = aiBrain:GetEconomyUsage('MASS')
             },
             energy = {
                 stored = aiBrain:GetEconomyStored('ENERGY'),
-                capacity = aiBrain:GetEconomyStorage('ENERGY'),
                 income = aiBrain:GetEconomyIncome('ENERGY'),
-                usage = aiBrain:GetEconomyUsage('ENERGY'),
-                requested = aiBrain:GetEconomyRequested('ENERGY'),
-                trend = aiBrain:GetEconomyTrend('ENERGY')
+                usage = aiBrain:GetEconomyUsage('ENERGY')
             }
         },
-        units = {},
-        enemies = {},
-        mass_spots = {}
+        units = {}
     }
 
-    -- Friendly Units with individual resource production/consumption and build rate
     local myUnits = aiBrain:GetListOfUnits(categories.ALLUNITS, false)
     if myUnits then
         for _, u in ipairs(myUnits) do
@@ -163,335 +161,334 @@ local function CollectFullState(aiBrain)
                     bp = bp.BlueprintId,
                     pos = { math.floor(pos[1]*10)/10, math.floor(pos[2]*10)/10, math.floor(pos[3]*10)/10 },
                     hp = u:GetHealth(),
-                    max_hp = u:GetMaxHealth(),
                     fraction = u:GetFractionComplete(),
-                    tags = GetUnitTags(u),
-                    mass_in = u.GetProductionPerSecondMass and u:GetProductionPerSecondMass() or 0,
-                    mass_out = u.GetConsumptionPerSecondMass and u:GetConsumptionPerSecondMass() or 0,
-                    energy_in = u.GetProductionPerSecondEnergy and u:GetProductionPerSecondEnergy() or 0,
-                    energy_out = u.GetConsumptionPerSecondEnergy and u:GetConsumptionPerSecondEnergy() or 0,
-                    build_rate = u.GetBuildRate and u:GetBuildRate() or 0,
-                    fuel = u.GetFuelRatio and u:GetFuelRatio() or 1.0
-                })
-            end
-        end
-    end
-
-    -- Spotted / Visible Enemy Units (Line of Sight + Radar + Omni)
-    local center = { mapWidth / 2, 0, mapHeight / 2 }
-    local radius = math.max(mapWidth, mapHeight) * 1.5
-    local enemyUnits = aiBrain:GetUnitsAroundPoint(categories.ALLUNITS, center, radius, 'Enemy')
-    if enemyUnits then
-        for _, u in ipairs(enemyUnits) do
-            if not u:IsDead() then
-                local pos = u:GetPosition()
-                local bp = u:GetBlueprint()
-                table.insert(state.enemies, {
-                    id = u:GetEntityId(),
-                    bp = bp.BlueprintId,
-                    pos = { math.floor(pos[1]*10)/10, math.floor(pos[2]*10)/10, math.floor(pos[3]*10)/10 },
-                    hp = u:GetHealth(),
-                    max_hp = u:GetMaxHealth(),
                     tags = GetUnitTags(u)
                 })
             end
         end
     end
-
-    -- Mass Deposits & Occupancy
-    local massPoints = aiBrain:GetDepositPoints('Mass')
-    if massPoints then
-        for _, mp in ipairs(massPoints) do
-            local allies = aiBrain:GetUnitsAroundPoint(categories.MASSEXTRACTION, mp, 4, 'Ally')
-            local enemies = aiBrain:GetUnitsAroundPoint(categories.MASSEXTRACTION, mp, 4, 'Enemy')
-            local occ = "free"
-            if allies and table.getn(allies) > 0 then
-                occ = "ally"
-            elseif enemies and table.getn(enemies) > 0 then
-                occ = "enemy"
-            end
-            table.insert(state.mass_spots, {
-                x = math.floor(mp[1]*10)/10,
-                z = math.floor(mp[3]*10)/10,
-                status = occ
-            })
-        end
-    end
-
     return state
 end
 
--- Resolve list of unit objects from IDs
-local function ResolveUnits(unitIds)
-    local list = {}
-    if type(unitIds) == "table" then
-        for _, id in ipairs(unitIds) do
-            local u = GetUnitById(id)
-            if u and not u:IsDead() then
-                table.insert(list, u)
+-- ============================================================
+-- Autonomous Scripted Mission Controller
+-- Orders:
+-- 1. ACU builds T1 Factory
+-- 2. ACU builds 2 Mass Extractors
+-- 3. ACU builds 4 Power Generators
+-- 4. ACU builds 2 Mass Extractors
+-- 5. ACU builds 4 Power Generators
+-- 6. Factory builds 5 T1 Engineers
+-- 7. Eng 1: Builds Anti-Air (AA)
+-- 8. Eng 2: Builds Point Defense (PD)
+-- 9. Eng 3: Builds Walls around PD
+-- 10. Eng 4: Builds Walls around AA
+-- 11. Eng 5: Reclaims trees, rocks, wrecks around base
+-- ============================================================
+local function FindValidBuildPosOffset(aiBrain, blueprintId, nearPos, offsetX, offsetZ)
+    local x = math.floor(nearPos[1] + offsetX)
+    local z = math.floor(nearPos[3] + offsetZ)
+    local y = GetTerrainHeight(x, z)
+    local testPos = { x, y, z }
+    if aiBrain:CanBuildStructureAt(blueprintId, testPos) then
+        return testPos
+    end
+    for r = 2, 20, 2 do
+        for angle = 0, 315, 45 do
+            local rad = angle * (math.pi / 180)
+            local tx = math.floor(x + math.cos(rad) * r)
+            local tz = math.floor(z + math.sin(rad) * r)
+            local ty = GetTerrainHeight(tx, tz)
+            local tPos = { tx, ty, tz }
+            if aiBrain:CanBuildStructureAt(blueprintId, tPos) then
+                return tPos
             end
         end
-    elseif type(unitIds) == "number" then
-        local u = GetUnitById(unitIds)
-        if u and not u:IsDead() then
-            table.insert(list, u)
-        end
     end
-    return list
+    return testPos
 end
 
--- Execute a single command
-local function ExecuteCommand(cmd)
-    if not cmd or not cmd.type then return end
-    local ctype = cmd.type
+local Mission = {
+    Initialized = false,
+    ACUOrdersIssued = false,
+    FactoryQueued = false,
+    AssignedEngineers = {},
+    ProcessedEngCount = 0,
+    PDPos = nil,
+    AAPos = nil,
+    SortedMassSpots = {}
+}
 
-    -- Move
-    if ctype == "move" and cmd.units and cmd.target then
-        local units = ResolveUnits(cmd.units)
-        if table.getn(units) > 0 then
-            IssueMove(units, { cmd.target[1], cmd.target[2] or 0, cmd.target[3] })
-        end
+local function RunAutonomousMission(aiBrain, factionIndex)
+    local bps = FACTION_BLUEPRINTS[factionIndex] or FACTION_BLUEPRINTS[3]
 
-    -- Attack Move
-    elseif ctype == "attack_move" and cmd.units and cmd.target then
-        local units = ResolveUnits(cmd.units)
-        if table.getn(units) > 0 then
-            IssueAggressiveMove(units, { cmd.target[1], cmd.target[2] or 0, cmd.target[3] })
-        end
+    local acus = aiBrain:GetListOfUnits(categories.COMMAND, false)
+    if not acus or not acus[1] or acus[1]:IsDead() then return end
+    local acu = acus[1]
+    local acuPos = acu:GetPosition()
 
-    -- Attack Unit
-    elseif ctype == "attack" and cmd.units and cmd.target_id then
-        local units = ResolveUnits(cmd.units)
-        local target = GetUnitById(cmd.target_id)
-        if table.getn(units) > 0 and target and not target:IsDead() then
-            IssueAttack(units, target)
-        end
+    -- 1. Setup Mass Spots
+    if not Mission.Initialized then
+        Mission.Initialized = true
+        Mission.SortedMassSpots = {}
 
-    -- Guard / Assist
-    elseif ctype == "guard" and cmd.units and cmd.target_id then
-        local units = ResolveUnits(cmd.units)
-        local target = GetUnitById(cmd.target_id)
-        if table.getn(units) > 0 and target and not target:IsDead() then
-            IssueGuard(units, target)
-        end
-
-    -- Patrol
-    elseif ctype == "patrol" and cmd.units and cmd.target then
-        local units = ResolveUnits(cmd.units)
-        if table.getn(units) > 0 then
-            IssuePatrol(units, { cmd.target[1], cmd.target[2] or 0, cmd.target[3] })
-        end
-
-    -- Stop
-    elseif ctype == "stop" and cmd.units then
-        local units = ResolveUnits(cmd.units)
-        if table.getn(units) > 0 then
-            IssueStop(units)
-        end
-
-    -- Build Mobile (Engineer / ACU / SACU)
-    elseif ctype == "build_mobile" and cmd.builder and cmd.blueprint and cmd.target then
-        local builder = GetUnitById(cmd.builder)
-        if builder and not builder:IsDead() then
-            IssueBuildMobile(builder, { cmd.target[1], cmd.target[2] or 0, cmd.target[3] }, cmd.blueprint, {})
-        end
-
-    -- Build Factory (Produce units / experimentals / planes / ships / tanks)
-    elseif ctype == "build_factory" and cmd.factory and cmd.blueprint then
-        local factory = GetUnitById(cmd.factory)
-        if factory and not factory:IsDead() then
-            local count = cmd.count or 1
-            IssueBuildFactory(factory, cmd.blueprint, count)
-        end
-
-    -- Upgrade Structure (Factory T1->T2->T3, Mex T1->T2->T3, Radar T1->T2->Omni)
-    elseif ctype == "upgrade" and cmd.unit and cmd.blueprint then
-        local unit = GetUnitById(cmd.unit)
-        if unit and not unit:IsDead() then
-            IssueUpgrade(unit, cmd.blueprint)
-        end
-
-    -- Enhance ACU / SACU (Gunnery, RAS, Shield, Stealth, Engineering suites)
-    elseif ctype == "enhance" and cmd.unit and cmd.enhancement then
-        local unit = GetUnitById(cmd.unit)
-        if unit and not unit:IsDead() then
-            IssueScript({unit}, { TaskName = "EnhanceTask", Enhancement = cmd.enhancement })
-        end
-
-    -- Reclaim Target or Area
-    elseif ctype == "reclaim" and cmd.builder then
-        local builder = GetUnitById(cmd.builder)
-        if builder and not builder:IsDead() then
-            if cmd.target_id then
-                local target = GetEntityById(cmd.target_id)
-                if target then IssueReclaim(builder, target) end
-            elseif cmd.target then
-                local pos = cmd.target
-                local reclaimables = GetReclaimablesInRect(pos[1]-15, pos[3]-15, pos[1]+15, pos[3]+15)
-                if reclaimables and reclaimables[1] then
-                    IssueReclaim(builder, reclaimables[1])
+        local markers = ScenarioUtils.GetMarkers()
+        if markers then
+            for name, marker in pairs(markers) do
+                if marker.type == 'Mass' and marker.position then
+                    table.insert(Mission.SortedMassSpots, marker.position)
                 end
             end
         end
 
-    -- Overcharge
-    elseif ctype == "overcharge" and cmd.commander and cmd.target then
-        local acu = GetUnitById(cmd.commander)
-        if acu and not acu:IsDead() then
-            IssueOverCharge(acu, { cmd.target[1], cmd.target[2] or 0, cmd.target[3] })
+        table.sort(Mission.SortedMassSpots, function(a, b)
+            local d1 = (a[1] - acuPos[1])^2 + (a[3] - acuPos[3])^2
+            local d2 = (b[1] - acuPos[1])^2 + (b[3] - acuPos[3])^2
+            return d1 < d2
+        end)
+
+        LOG(string.format("PyAgent Mission: Found %d mass spots. Initializing build queue...", table.getn(Mission.SortedMassSpots)))
+    end
+
+    -- 2. Issue ACU Build Order Queue (ONCE)
+    if not Mission.ACUOrdersIssued then
+        Mission.ACUOrdersIssued = true
+
+        LOG("PyAgent Mission: Issuing ACU build orders...")
+
+        -- Land Factory (find valid build position at offset from ACU)
+        local facPos = FindValidBuildPosOffset(aiBrain, bps.factory, acuPos, 12, 12)
+        LOG(string.format("PyAgent Mission: Land Factory position validated at (%.1f, %.1f)", facPos[1], facPos[3]))
+        IssueBuildMobile({ acu }, facPos, bps.factory, {})
+
+        -- 2 Mass Extractors
+        if Mission.SortedMassSpots[1] then
+            local s1 = Mission.SortedMassSpots[1]
+            local mpos1 = { s1[1], GetTerrainHeight(s1[1], s1[3]), s1[3] }
+            IssueBuildMobile({ acu }, mpos1, bps.mex, {})
+        end
+        if Mission.SortedMassSpots[2] then
+            local s2 = Mission.SortedMassSpots[2]
+            local mpos2 = { s2[1], GetTerrainHeight(s2[1], s2[3]), s2[3] }
+            IssueBuildMobile({ acu }, mpos2, bps.mex, {})
         end
 
-    -- Game Speed
-    elseif ctype == "set_speed" and cmd.speed then
-        SetGameSpeed(tonumber(cmd.speed))
+        -- 4 Power Generators (Row 1 near factory)
+        local p1 = FindValidBuildPosOffset(aiBrain, bps.pgen, facPos, 6, 0)
+        local p2 = FindValidBuildPosOffset(aiBrain, bps.pgen, facPos, 9, 0)
+        local p3 = FindValidBuildPosOffset(aiBrain, bps.pgen, facPos, 6, 3)
+        local p4 = FindValidBuildPosOffset(aiBrain, bps.pgen, facPos, 9, 3)
+        IssueBuildMobile({ acu }, p1, bps.pgen, {})
+        IssueBuildMobile({ acu }, p2, bps.pgen, {})
+        IssueBuildMobile({ acu }, p3, bps.pgen, {})
+        IssueBuildMobile({ acu }, p4, bps.pgen, {})
 
-    -- Switch controlled army
-    elseif ctype == "set_army" and cmd.army then
-        _G.PyAgent_Bridge.ArmyIndex = tonumber(cmd.army)
-        local newBrain = GetArmyBrain(_G.PyAgent_Bridge.ArmyIndex)
-        if newBrain and _G.PyAgent_Bridge.DisableAI ~= false then
-            DisableInternalAI(newBrain)
+        -- 2 Mass Extractors
+        if Mission.SortedMassSpots[3] then
+            local s3 = Mission.SortedMassSpots[3]
+            local mpos3 = { s3[1], GetTerrainHeight(s3[1], s3[3]), s3[3] }
+            IssueBuildMobile({ acu }, mpos3, bps.mex, {})
         end
-    end
-end
-
--- Helper to disable game internal AI script threads for controlled army
-function DisableInternalAI(aiBrain)
-    if not aiBrain then return end
-    if aiBrain.EvaluateThread then
-        KillThread(aiBrain.EvaluateThread)
-        aiBrain.EvaluateThread = nil
-    end
-    if aiBrain.ExecuteThread then
-        KillThread(aiBrain.ExecuteThread)
-        aiBrain.ExecuteThread = nil
-    end
-    aiBrain.RepeatExecution = false
-    LOG("PyAgent: Internal AI disabled for army " .. tostring(aiBrain:GetArmyIndex()))
-end
-
--- Helper to read external config if present
-local function LoadConfig(self)
-    if FileExists(self.CONFIG_FILE) then
-        local cfgStr = ReadFile(self.CONFIG_FILE)
-        if cfgStr then
-            local arm = string.match(cfgStr, '"army"%s*:%s*(%d+)')
-            if arm then self.ArmyIndex = tonumber(arm) end
-            local spd = string.match(cfgStr, '"speed"%s*:%s*(%-?%d+)')
-            if spd then self.GameSpeed = tonumber(spd) end
-            local dis = string.match(cfgStr, '"disable_ai"%s*:%s*(%a+)')
-            if dis == "false" then self.DisableAI = false end
-            LOG(string.format("PyAgent: Config loaded. Army=%d, Speed=%s, DisableAI=%s",
-                self.ArmyIndex, tostring(self.GameSpeed), tostring(self.DisableAI)))
-        end
-    end
-end
-
--- Lightweight Command Batch Parser
-local function ExecuteCommandsJson(str)
-    if not str then return end
-    for obj in string.gfind(str, '(%{[^%}%{]+%})') do
-        local cmd = {}
-        cmd.type = string.match(obj, '"type"%s*:%s*"([^"]+)"')
-        
-        local bp = string.match(obj, '"blueprint"%s*:%s*"([^"]+)"')
-        if bp then cmd.blueprint = bp end
-
-        local enh = string.match(obj, '"enhancement"%s*:%s*"([^"]+)"')
-        if enh then cmd.enhancement = enh end
-
-        local bldr = string.match(obj, '"builder"%s*:%s*(%d+)')
-        if bldr then cmd.builder = tonumber(bldr) end
-
-        local fct = string.match(obj, '"factory"%s*:%s*(%d+)')
-        if fct then cmd.factory = tonumber(fct) end
-
-        local unt = string.match(obj, '"unit"%s*:%s*(%d+)')
-        if unt then cmd.unit = tonumber(unt) end
-
-        local tid = string.match(obj, '"target_id"%s*:%s*(%d+)')
-        if tid then cmd.target_id = tonumber(tid) end
-
-        local cnt = string.match(obj, '"count"%s*:%s*(%d+)')
-        if cnt then cmd.count = tonumber(cnt) end
-
-        local spd = string.match(obj, '"speed"%s*:%s*(%-?%d+)')
-        if spd then cmd.speed = tonumber(spd) end
-
-        local arm = string.match(obj, '"army"%s*:%s*(%d+)')
-        if arm then cmd.army = tonumber(arm) end
-
-        local tx, tz = string.match(obj, '"target"%s*:%s*%[%s*([%d%.%-]+)%s*,%s*[%d%.%-]+%s*,%s*([%d%.%-]+)%s*%]')
-        if tx and tz then
-            cmd.target = { tonumber(tx), 0, tonumber(tz) }
+        if Mission.SortedMassSpots[4] then
+            local s4 = Mission.SortedMassSpots[4]
+            local mpos4 = { s4[1], GetTerrainHeight(s4[1], s4[3]), s4[3] }
+            IssueBuildMobile({ acu }, mpos4, bps.mex, {})
         end
 
-        local unitsPart = string.match(obj, '"units"%s*:%s*%[([^%]]+)%]')
-        if unitsPart then
-            cmd.units = {}
-            for uid in string.gfind(unitsPart, '(%d+)') do
-                table.insert(cmd.units, tonumber(uid))
+        -- 4 Power Generators (Row 2 near factory)
+        local p5 = FindValidBuildPosOffset(aiBrain, bps.pgen, facPos, -6, 0)
+        local p6 = FindValidBuildPosOffset(aiBrain, bps.pgen, facPos, -9, 0)
+        local p7 = FindValidBuildPosOffset(aiBrain, bps.pgen, facPos, -6, -3)
+        local p8 = FindValidBuildPosOffset(aiBrain, bps.pgen, facPos, -9, -3)
+        IssueBuildMobile({ acu }, p5, bps.pgen, {})
+        IssueBuildMobile({ acu }, p6, bps.pgen, {})
+        IssueBuildMobile({ acu }, p7, bps.pgen, {})
+        IssueBuildMobile({ acu }, p8, bps.pgen, {})
+
+        LOG("PyAgent Mission: ACU opening queue completed: Factory -> 2 Mex -> 4 PGen -> 2 Mex -> 4 PGen")
+    end
+
+    -- 3. Check Land Factory Completion and Queue 5 Engineers
+    local factories = aiBrain:GetListOfUnits(categories.FACTORY * categories.LAND, false)
+    if factories and factories[1] and not Mission.FactoryQueued then
+        local fac = factories[1]
+        if fac:GetFractionComplete() >= 1.0 and not fac:IsDead() then
+            LOG("PyAgent Mission: Land Factory is READY! Queueing 5 Engineers...")
+            IssueBuildFactory({ fac }, bps.engineer, 5)
+            Mission.FactoryQueued = true
+        end
+    end
+
+    -- 4. Track and Task Each of the 5 Engineers as they are built
+    local allEngs = aiBrain:GetListOfUnits(categories.ENGINEER - categories.COMMAND, false)
+    if allEngs then
+        for _, eng in ipairs(allEngs) do
+            local eid = eng:GetEntityId()
+            if not eng:IsDead() and eng:GetFractionComplete() >= 1.0 and not Mission.AssignedEngineers[eid] then
+                Mission.ProcessedEngCount = Mission.ProcessedEngCount + 1
+                local engNum = Mission.ProcessedEngCount
+                Mission.AssignedEngineers[eid] = engNum
+
+                LOG(string.format("PyAgent Mission: Engineer #%d (ID %d) ready for assignment!", engNum, eid))
+
+                -- Engineer 1: Builds Anti-Air (AA)
+                if engNum == 1 then
+                    Mission.AAPos = FindValidBuildPosOffset(aiBrain, bps.aa, acuPos, -10, 14)
+                    LOG(string.format("PyAgent Mission: Eng #1 -> Building Anti-Air at (%.1f, %.1f)", Mission.AAPos[1], Mission.AAPos[3]))
+                    IssueBuildMobile({ eng }, Mission.AAPos, bps.aa, {})
+
+                -- Engineer 2: Builds Point Defense (PD)
+                elseif engNum == 2 then
+                    Mission.PDPos = FindValidBuildPosOffset(aiBrain, bps.pd, acuPos, 14, 8)
+                    LOG(string.format("PyAgent Mission: Eng #2 -> Building Point Defense at (%.1f, %.1f)", Mission.PDPos[1], Mission.PDPos[3]))
+                    IssueBuildMobile({ eng }, Mission.PDPos, bps.pd, {})
+
+                -- Engineer 3: Builds Walls around Point Defense
+                elseif engNum == 3 then
+                    local center = Mission.PDPos or FindValidBuildPosOffset(aiBrain, bps.pd, acuPos, 14, 8)
+                    LOG(string.format("PyAgent Mission: Eng #3 -> Building Walls around PD at (%.1f, %.1f)", center[1], center[3]))
+                    local cx, cz = center[1], center[3]
+                    local wallOffsets = {
+                        { 2.5, 0 }, { -2.5, 0 }, { 0, 2.5 }, { 0, -2.5 },
+                        { 2.5, 2.5 }, { -2.5, -2.5 }, { 2.5, -2.5 }, { -2.5, 2.5 }
+                    }
+                    for _, off in ipairs(wallOffsets) do
+                        local wx = cx + off[1]
+                        local wz = cz + off[2]
+                        local wpos = { wx, GetTerrainHeight(wx, wz), wz }
+                        IssueBuildMobile({ eng }, wpos, bps.wall, {})
+                    end
+
+                -- Engineer 4: Builds Walls around Anti-Air
+                elseif engNum == 4 then
+                    local center = Mission.AAPos or FindValidBuildPosOffset(aiBrain, bps.aa, acuPos, -10, 14)
+                    LOG(string.format("PyAgent Mission: Eng #4 -> Building Walls around AA at (%.1f, %.1f)", center[1], center[3]))
+                    local cx, cz = center[1], center[3]
+                    local wallOffsets = {
+                        { 2.5, 0 }, { -2.5, 0 }, { 0, 2.5 }, { 0, -2.5 },
+                        { 2.5, 2.5 }, { -2.5, -2.5 }, { 2.5, -2.5 }, { -2.5, 2.5 }
+                    }
+                    for _, off in ipairs(wallOffsets) do
+                        local wx = cx + off[1]
+                        local wz = cz + off[2]
+                        local wpos = { wx, GetTerrainHeight(wx, wz), wz }
+                        IssueBuildMobile({ eng }, wpos, bps.wall, {})
+                    end
+
+                -- Engineer 5: Reclaims trees, rocks, wrecks around the base
+                elseif engNum >= 5 then
+                    LOG("PyAgent Mission: Eng #5 -> Starting Reclaim operations around the base...")
+                    local rect = Rect(acuPos[1] - 90, acuPos[3] - 90, acuPos[1] + 90, acuPos[3] + 90)
+                    local reclaimables = GetReclaimablesInRect(rect)
+                    local count = 0
+                    if reclaimables then
+                        for _, prop in ipairs(reclaimables) do
+                            if prop and not IsDestroyed(prop) and ((prop.MaxMassReclaim and prop.MaxMassReclaim > 0) or (prop.MaxEnergyReclaim and prop.MaxEnergyReclaim > 0)) then
+                                IssueReclaim({ eng }, prop)
+                                count = count + 1
+                                if count >= 35 then break end
+                            end
+                        end
+                    end
+                    LOG(string.format("PyAgent Mission: Eng #5 queued %d reclaim targets!", count))
+                end
             end
         end
-
-        ExecuteCommand(cmd)
     end
 end
 
--- Main Sim Hook Loop
+-- ============================================================
+-- Execute External Python Command
+-- ============================================================
+local function ExecuteCommand(cmd)
+    if not cmd or not cmd.type then return end
+    local ctype = cmd.type
+
+    if ctype == "move" and cmd.units and cmd.target then
+        local units = {}
+        for _, id in ipairs(cmd.units) do
+            local u = GetUnitById(id)
+            if u and not u:IsDead() then table.insert(units, u) end
+        end
+        if table.getn(units) > 0 then
+            IssueMove(units, { cmd.target[1], cmd.target[2] or 0, cmd.target[3] })
+        end
+
+    elseif ctype == "build_mobile" and cmd.builder and cmd.blueprint and cmd.target then
+        local b = GetUnitById(cmd.builder)
+        if b and not b:IsDead() then
+            IssueBuildMobile({ b }, { cmd.target[1], cmd.target[2] or 0, cmd.target[3] }, cmd.blueprint, {})
+        end
+
+    elseif ctype == "build_factory" and cmd.factory and cmd.blueprint then
+        local f = GetUnitById(cmd.factory)
+        if f and not f:IsDead() then
+            IssueBuildFactory({ f }, cmd.blueprint, cmd.count or 1)
+        end
+
+    elseif ctype == "reclaim" and cmd.builder then
+        local b = GetUnitById(cmd.builder)
+        if b and not b:IsDead() and cmd.target_id then
+            local t = GetEntityById(cmd.target_id)
+            if t then IssueReclaim({ b }, t) end
+        end
+    end
+end
+
+-- ============================================================
+-- Read External Commands via doscript
+-- ============================================================
+local function ReadAndExecuteCommands()
+    local ok = pcall(doscript, _G.PyAgent_Bridge.CMD_PATH)
+    if ok and _G.PYAGENT_COMMANDS then
+        local data = _G.PYAGENT_COMMANDS
+        if data.seq and data.seq > _G.PyAgent_Bridge.LastCmdSeq and data.commands then
+            _G.PyAgent_Bridge.LastCmdSeq = data.seq
+            for _, cmd in ipairs(data.commands) do
+                pcall(ExecuteCommand, cmd)
+            end
+        end
+    end
+end
+
+-- ============================================================
+-- Main Sim Bridge Thread
+-- ============================================================
 function _G.PyAgent_Bridge.Start()
     if _G.PyAgent_Bridge.Running then return end
     _G.PyAgent_Bridge.Running = true
 
     local self = _G.PyAgent_Bridge
-    LoadConfig(self)
-
-    LOG(string.format("PyAgent: Full API Bridge starting on Army %d, Speed %d...", self.ArmyIndex, self.GameSpeed))
-    SetGameSpeed(self.GameSpeed)
+    LOG(string.format("PyAgent: Bridge starting on Army %d...", self.ArmyIndex))
 
     -- Wait 30 ticks for ACU landing animation to finish
     WaitTicks(30)
 
-    -- Disable internal game AI on controlled army
-    local controlledBrain = GetArmyBrain(self.ArmyIndex)
-    if controlledBrain and self.DisableAI ~= false then
-        DisableInternalAI(controlledBrain)
-    end
+    local aiBrain = GetArmyBrain(self.ArmyIndex)
+    local factionIndex = aiBrain and aiBrain:GetFactionIndex() or 3
+    LOG(string.format("PyAgent: Controlled Army=%d, Faction=%d", self.ArmyIndex, factionIndex))
 
-    while not IsGameOver() and not FileExists(self.STOP_FILE) do
+    while not IsGameOver() do
         self.StepId = self.StepId + 1
 
-        local aiBrain = GetArmyBrain(self.ArmyIndex)
-        if aiBrain then
-            -- 1. Harvest complete state
-            local state = CollectFullState(aiBrain)
+        local brain = GetArmyBrain(self.ArmyIndex)
+        if brain then
+            -- 1. Execute autonomous mission steps
+            RunAutonomousMission(brain, factionIndex)
+
+            -- 2. Emit state to game.log
+            local state = CollectState(brain)
             local stateJson = SerializeJson(state)
-
-            -- 2. Publish state to /dev/shm
-            WriteFile(self.STATE_FILE, stateJson)
-            WriteFile(self.STATE_READY, tostring(self.StepId))
+            LOG("##PYAGENT_STATE##" .. stateJson)
         end
 
-        -- 3. Wait for Python commands handshake (up to 5 seconds timeout)
-        local waitCount = 0
-        while not FileExists(self.CMD_READY) and waitCount < 50 and not FileExists(self.STOP_FILE) do
-            WaitTicks(1)
-            waitCount = waitCount + 1
-        end
+        -- 3. Execute external commands if any
+        ReadAndExecuteCommands()
 
-        -- 4. Process incoming commands
-        if FileExists(self.CMD_READY) then
-            local cmdJson = ReadFile(self.CMD_FILE)
-            if cmdJson then
-                ExecuteCommandsJson(cmdJson)
-            end
-            os.remove(self.CMD_READY)
-        end
-
-        -- Step advance (10 sim ticks = 1 game second)
-        WaitTicks(10)
+        -- Advance simulation (10 sim ticks = 1 second at 1.0x speed)
+        WaitTicks(self.TickInterval)
     end
 
-    LOG("PyAgent: Bridge finished session.")
+    LOG("PyAgent: Bridge session finished.")
     _G.PyAgent_Bridge.Running = false
 end

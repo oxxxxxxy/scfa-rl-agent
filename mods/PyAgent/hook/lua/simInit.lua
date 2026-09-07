@@ -4,7 +4,7 @@ local PrevBeginSession = BeginSession
 function BeginSession()
     ForkThread(function()
         LOG("PyAgent: Starting RL Bridge...")
-        local ok, err = pcall(import, '/mods/PyAgent/modules/rl_bridge.lua')
+        local ok, err = pcall(import, '/mods/pyagent/modules/rl_bridge.lua')
         if not ok then
             LOG("PyAgent Error importing rl_bridge: " .. tostring(err))
             return
