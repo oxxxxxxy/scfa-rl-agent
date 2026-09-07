@@ -12,11 +12,13 @@ from .commands import (
     BuildFactoryCommand,
     BuildMobileCommand,
     CommandBuffer,
+    EnhanceCommand,
     GuardCommand,
     MoveCommand,
     OverchargeCommand,
     PatrolCommand,
     ReclaimCommand,
+    SetArmyCommand,
     SetSpeedCommand,
     StopCommand,
     UpgradeCommand,
@@ -131,7 +133,7 @@ class SCFAClient:
         blueprint: str,
         target: Tuple[float, float, float]
     ) -> None:
-        """Orders an engineer or ACU to construct a structure at the target location."""
+        """Orders an engineer, ACU, or SACU to construct a structure at the target location."""
         builder_id = builder.id if isinstance(builder, Unit) else int(builder)
         actual_bp = get_blueprint(self.faction, blueprint)
         self.buffer.add(BuildMobileCommand(builder=builder_id, blueprint=actual_bp, target=target))
@@ -142,7 +144,7 @@ class SCFAClient:
         blueprint: str,
         count: int = 1
     ) -> None:
-        """Queues production of a unit or structure inside a factory."""
+        """Queues production of units or experimentals inside a factory."""
         factory_id = factory.id if isinstance(factory, Unit) else int(factory)
         actual_bp = get_blueprint(self.faction, blueprint)
         self.buffer.add(BuildFactoryCommand(factory=factory_id, blueprint=actual_bp, count=count))
@@ -152,10 +154,19 @@ class SCFAClient:
         unit: Union[int, Unit],
         blueprint: str
     ) -> None:
-        """Orders a factory, mex, or commander to upgrade to next tier or enhancement."""
+        """Orders a factory, mex, or radar to upgrade to next tier (T1->T2->T3)."""
         unit_id = unit.id if isinstance(unit, Unit) else int(unit)
         actual_bp = get_blueprint(self.faction, blueprint)
         self.buffer.add(UpgradeCommand(unit=unit_id, blueprint=actual_bp))
+
+    def enhance(
+        self,
+        unit: Union[int, Unit],
+        enhancement_name: str
+    ) -> None:
+        """Orders an enhancement on ACU or SACU (e.g. Gunnery, RAS, Stealth, Shield)."""
+        unit_id = unit.id if isinstance(unit, Unit) else int(unit)
+        self.buffer.add(EnhanceCommand(unit=unit_id, enhancement=enhancement_name))
 
     def reclaim(
         self,
@@ -179,6 +190,10 @@ class SCFAClient:
     def set_game_speed(self, speed: int) -> None:
         """Adjusts in-game simulation speed (-10 to +10)."""
         self.buffer.add(SetSpeedCommand(speed=speed))
+
+    def set_army(self, army_index: int) -> None:
+        """Switches controlled bot army (e.g. 1, 2)."""
+        self.buffer.add(SetArmyCommand(army=army_index))
 
 
 class GameSession:

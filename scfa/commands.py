@@ -105,6 +105,15 @@ class UpgradeCommand(Command):
 
 
 @dataclass
+class EnhanceCommand(Command):
+    unit: int
+    enhancement: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"type": "enhance", "unit": self.unit, "enhancement": self.enhancement}
+
+
+@dataclass
 class ReclaimCommand(Command):
     builder: int
     target: Optional[Tuple[float, float, float]] = None
@@ -134,6 +143,14 @@ class SetSpeedCommand(Command):
 
     def to_dict(self) -> Dict[str, Any]:
         return {"type": "set_speed", "speed": self.speed}
+
+
+@dataclass
+class SetArmyCommand(Command):
+    army: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"type": "set_army", "army": self.army}
 
 
 class CommandBuffer:

@@ -7,6 +7,7 @@ local AIUtils = import('/lua/ai/aiutilities.lua')
 _G.PyAgent_Bridge = {
     Running = false,
     StepId = 0,
+    ArmyIndex = 1, -- Default to Army 1 (can be switched via command)
     SHM_DIR = "Z:/dev/shm/",
     STATE_FILE = "Z:/dev/shm/scfa_state.json",
     STATE_READY = "Z:/dev/shm/scfa_state.ready",
@@ -84,6 +85,7 @@ end
 local function GetUnitTags(unit)
     local tags = {}
     if EntityCategoryContains(categories.COMMAND, unit) then table.insert(tags, "COMMANDER") end
+    if EntityCategoryContains(categories.SUBCOMMANDER, unit) then table.insert(tags, "SUBCOMMANDER") end
     if EntityCategoryContains(categories.ENGINEER, unit) then table.insert(tags, "ENGINEER") end
     if EntityCategoryContains(categories.FACTORY, unit) then table.insert(tags, "FACTORY") end
     if EntityCategoryContains(categories.LAND, unit) then table.insert(tags, "LAND") end
@@ -93,8 +95,13 @@ local function GetUnitTags(unit)
     if EntityCategoryContains(categories.MASSEXTRACTION, unit) then table.insert(tags, "MASSEXTRACTION") end
     if EntityCategoryContains(categories.ENERGYPRODUCTION, unit) then table.insert(tags, "ENERGYPRODUCTION") end
     if EntityCategoryContains(categories.DIRECTFIRE, unit) then table.insert(tags, "DIRECTFIRE") end
+    if EntityCategoryContains(categories.INDIRECTFIRE, unit) then table.insert(tags, "INDIRECTFIRE") end
     if EntityCategoryContains(categories.ANTIAIR, unit) then table.insert(tags, "ANTIAIR") end
     if EntityCategoryContains(categories.DEFENSE, unit) then table.insert(tags, "DEFENSE") end
+    if EntityCategoryContains(categories.RADAR, unit) then table.insert(tags, "RADAR") end
+    if EntityCategoryContains(categories.SONAR, unit) then table.insert(tags, "SONAR") end
+    if EntityCategoryContains(categories.OMNI, unit) then table.insert(tags, "OMNI") end
+    if EntityCategoryContains(categories.SHIELD, unit) then table.insert(tags, "SHIELD") end
     if EntityCategoryContains(categories.TECH1, unit) then table.insert(tags, "TECH1") end
     if EntityCategoryContains(categories.TECH2, unit) then table.insert(tags, "TECH2") end
     if EntityCategoryContains(categories.TECH3, unit) then table.insert(tags, "TECH3") end
@@ -104,11 +111,12 @@ end
 
 -- Collect comprehensive game state
 local function CollectFullState(aiBrain)
-    local mapWidth = ScenarioInfo.size[1] or 512
-    local mapHeight = ScenarioInfo.size[2] or 512
+    local mapWidth = (ScenarioInfo.size and ScenarioInfo.size[1]) or 512
+    local mapHeight = (ScenarioInfo.size and ScenarioInfo.size[2]) or 512
 
     local state = {
         step = _G.PyAgent_Bridge.StepId,
+        army_index = _G.PyAgent_Bridge.ArmyIndex,
         game_time = GetGameTimeSeconds(),
         game_tick = GetGameTick(),
         game_speed = GetGameSpeed(),
@@ -140,7 +148,7 @@ local function CollectFullState(aiBrain)
         mass_spots = {}
     }
 
-    -- Friendly Units
+    -- Friendly Units with individual resource production/consumption and build rate
     local myUnits = aiBrain:GetListOfUnits(categories.ALLUNITS, false)
     if myUnits then
         for _, u in ipairs(myUnits) do
@@ -154,13 +162,19 @@ local function CollectFullState(aiBrain)
                     hp = u:GetHealth(),
                     max_hp = u:GetMaxHealth(),
                     fraction = u:GetFractionComplete(),
-                    tags = GetUnitTags(u)
+                    tags = GetUnitTags(u),
+                    mass_in = u.GetProductionPerSecondMass and u:GetProductionPerSecondMass() or 0,
+                    mass_out = u.GetConsumptionPerSecondMass and u:GetConsumptionPerSecondMass() or 0,
+                    energy_in = u.GetProductionPerSecondEnergy and u:GetProductionPerSecondEnergy() or 0,
+                    energy_out = u.GetConsumptionPerSecondEnergy and u:GetConsumptionPerSecondEnergy() or 0,
+                    build_rate = u.GetBuildRate and u:GetBuildRate() or 0,
+                    fuel = u.GetFuelRatio and u:GetFuelRatio() or 1.0
                 })
             end
         end
     end
 
-    -- Spotted / Visible Enemy Units
+    -- Spotted / Visible Enemy Units (Line of Sight + Radar + Omni)
     local center = { mapWidth / 2, 0, mapHeight / 2 }
     local radius = math.max(mapWidth, mapHeight) * 1.5
     local enemyUnits = aiBrain:GetUnitsAroundPoint(categories.ALLUNITS, center, radius, 'Enemy')
@@ -272,14 +286,14 @@ local function ExecuteCommand(cmd)
             IssueStop(units)
         end
 
-    -- Build Mobile (Engineer / ACU)
+    -- Build Mobile (Engineer / ACU / SACU)
     elseif ctype == "build_mobile" and cmd.builder and cmd.blueprint and cmd.target then
         local builder = GetUnitById(cmd.builder)
         if builder and not builder:IsDead() then
             IssueBuildMobile(builder, { cmd.target[1], cmd.target[2] or 0, cmd.target[3] }, cmd.blueprint, {})
         end
 
-    -- Build Factory (Produce units)
+    -- Build Factory (Produce units / experimentals / planes / ships / tanks)
     elseif ctype == "build_factory" and cmd.factory and cmd.blueprint then
         local factory = GetUnitById(cmd.factory)
         if factory and not factory:IsDead() then
@@ -287,11 +301,18 @@ local function ExecuteCommand(cmd)
             IssueBuildFactory(factory, cmd.blueprint, count)
         end
 
-    -- Upgrade
+    -- Upgrade Structure (Factory T1->T2->T3, Mex T1->T2->T3, Radar T1->T2->Omni)
     elseif ctype == "upgrade" and cmd.unit and cmd.blueprint then
         local unit = GetUnitById(cmd.unit)
         if unit and not unit:IsDead() then
             IssueUpgrade(unit, cmd.blueprint)
+        end
+
+    -- Enhance ACU / SACU (Gunnery, RAS, Shield, Stealth, Engineering suites)
+    elseif ctype == "enhance" and cmd.unit and cmd.enhancement then
+        local unit = GetUnitById(cmd.unit)
+        if unit and not unit:IsDead() then
+            IssueScript({unit}, { TaskName = "EnhanceTask", Enhancement = cmd.enhancement })
         end
 
     -- Reclaim Target or Area
@@ -320,20 +341,25 @@ local function ExecuteCommand(cmd)
     -- Game Speed
     elseif ctype == "set_speed" and cmd.speed then
         SetGameSpeed(tonumber(cmd.speed))
+
+    -- Switch controlled army
+    elseif ctype == "set_army" and cmd.army then
+        _G.PyAgent_Bridge.ArmyIndex = tonumber(cmd.army)
     end
 end
 
 -- Lightweight Command Batch Parser
--- Parses JSON commands list like: [{"type":"move","units":[1,2],"target":[10,0,20]}]
 local function ExecuteCommandsJson(str)
     if not str then return end
-    -- Find individual JSON objects in the array
     for obj in string.gfind(str, '(%{[^%}%{]+%})') do
         local cmd = {}
         cmd.type = string.match(obj, '"type"%s*:%s*"([^"]+)"')
         
         local bp = string.match(obj, '"blueprint"%s*:%s*"([^"]+)"')
         if bp then cmd.blueprint = bp end
+
+        local enh = string.match(obj, '"enhancement"%s*:%s*"([^"]+)"')
+        if enh then cmd.enhancement = enh end
 
         local bldr = string.match(obj, '"builder"%s*:%s*(%d+)')
         if bldr then cmd.builder = tonumber(bldr) end
@@ -353,13 +379,14 @@ local function ExecuteCommandsJson(str)
         local spd = string.match(obj, '"speed"%s*:%s*(%d+)')
         if spd then cmd.speed = tonumber(spd) end
 
-        -- Target coordinates [x, y, z]
+        local arm = string.match(obj, '"army"%s*:%s*(%d+)')
+        if arm then cmd.army = tonumber(arm) end
+
         local tx, tz = string.match(obj, '"target"%s*:%s*%[%s*([%d%.%-]+)%s*,%s*[%d%.%-]+%s*,%s*([%d%.%-]+)%s*%]')
         if tx and tz then
             cmd.target = { tonumber(tx), 0, tonumber(tz) }
         end
 
-        -- Units array: "units": [1, 2, 3]
         local unitsPart = string.match(obj, '"units"%s*:%s*%[([^%]]+)%]')
         if unitsPart then
             cmd.units = {}
@@ -381,7 +408,6 @@ function _G.PyAgent_Bridge.Start()
     SetGameSpeed(10)
 
     local self = _G.PyAgent_Bridge
-    local aiBrain = GetArmyBrain(1) -- Default Player / Bot Army 1
 
     -- Wait 30 ticks for ACU landing animation to finish
     WaitTicks(30)
@@ -389,13 +415,16 @@ function _G.PyAgent_Bridge.Start()
     while not IsGameOver() and not FileExists(self.STOP_FILE) do
         self.StepId = self.StepId + 1
 
-        -- 1. Harvest complete state
-        local state = CollectFullState(aiBrain)
-        local stateJson = SerializeJson(state)
+        local aiBrain = GetArmyBrain(self.ArmyIndex)
+        if aiBrain then
+            -- 1. Harvest complete state
+            local state = CollectFullState(aiBrain)
+            local stateJson = SerializeJson(state)
 
-        -- 2. Publish state to /dev/shm
-        WriteFile(self.STATE_FILE, stateJson)
-        WriteFile(self.STATE_READY, tostring(self.StepId))
+            -- 2. Publish state to /dev/shm
+            WriteFile(self.STATE_FILE, stateJson)
+            WriteFile(self.STATE_READY, tostring(self.StepId))
+        end
 
         -- 3. Wait for Python commands handshake (up to 5 seconds timeout)
         local waitCount = 0

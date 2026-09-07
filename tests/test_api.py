@@ -18,6 +18,7 @@ def test_blueprint_resolution():
 def test_gamestate_and_unit_queries():
     sample_data = {
         "step": 5,
+        "army_index": 1,
         "game_time": 25.0,
         "game_tick": 250,
         "game_speed": 10.0,
@@ -35,7 +36,12 @@ def test_gamestate_and_unit_queries():
                 "hp": 12000.0,
                 "max_hp": 12000.0,
                 "fraction": 1.0,
-                "tags": ["COMMANDER", "LAND", "DIRECTFIRE"]
+                "tags": ["COMMANDER", "LAND", "DIRECTFIRE"],
+                "mass_in": 1.0,
+                "mass_out": 0.0,
+                "energy_in": 20.0,
+                "energy_out": 0.0,
+                "build_rate": 10.0
             },
             {
                 "id": 2,
@@ -44,7 +50,12 @@ def test_gamestate_and_unit_queries():
                 "hp": 260.0,
                 "max_hp": 260.0,
                 "fraction": 1.0,
-                "tags": ["ENGINEER", "LAND", "TECH1"]
+                "tags": ["ENGINEER", "LAND", "TECH1"],
+                "mass_in": 0.0,
+                "mass_out": 2.0,
+                "energy_in": 0.0,
+                "energy_out": 10.0,
+                "build_rate": 5.0
             },
             {
                 "id": 3,
@@ -53,7 +64,12 @@ def test_gamestate_and_unit_queries():
                 "hp": 3200.0,
                 "max_hp": 3200.0,
                 "fraction": 1.0,
-                "tags": ["FACTORY", "STRUCTURE", "LAND", "TECH1"]
+                "tags": ["FACTORY", "STRUCTURE", "LAND", "TECH1"],
+                "mass_in": 0.0,
+                "mass_out": 15.0,
+                "energy_in": 0.0,
+                "energy_out": 50.0,
+                "build_rate": 20.0
             },
             {
                 "id": 4,
@@ -63,6 +79,33 @@ def test_gamestate_and_unit_queries():
                 "max_hp": 290.0,
                 "fraction": 1.0,
                 "tags": ["LAND", "DIRECTFIRE", "TECH1"]
+            },
+            {
+                "id": 5,
+                "bp": "url0301",
+                "pos": [110.0, 15.0, 130.0],
+                "hp": 10000.0,
+                "max_hp": 10000.0,
+                "fraction": 1.0,
+                "tags": ["SUBCOMMANDER", "LAND", "DIRECTFIRE"]
+            },
+            {
+                "id": 6,
+                "bp": "urb3101",
+                "pos": [80.0, 15.0, 100.0],
+                "hp": 500.0,
+                "max_hp": 500.0,
+                "fraction": 1.0,
+                "tags": ["RADAR", "STRUCTURE", "TECH1"]
+            },
+            {
+                "id": 7,
+                "bp": "url0402",
+                "pos": [160.0, 15.0, 190.0],
+                "hp": 45000.0,
+                "max_hp": 45000.0,
+                "fraction": 1.0,
+                "tags": ["EXPERIMENTAL", "LAND", "DIRECTFIRE"]
             }
         ],
         "enemies": [
@@ -95,19 +138,33 @@ def test_gamestate_and_unit_queries():
     assert acu is not None
     assert acu.id == 1
     assert acu.is_commander
-    assert acu.health == 12000.0
+    assert acu.mass_in == 1.0
+    assert acu.energy_in == 20.0
+    assert acu.build_rate == 10.0
 
     engineers = state.get_engineers()
     assert len(engineers) == 1
-    assert engineers[0].id == 2
+    assert engineers[0].mass_out == 2.0
 
     factories = state.get_factories()
     assert len(factories) == 1
-    assert factories[0].id == 3
+    assert factories[0].build_rate == 20.0
 
     combat = state.get_combat_units()
-    assert len(combat) == 1
-    assert combat[0].id == 4
+    assert len(combat) == 2  # Unit 4 and Unit 7 (experimental)
+    assert not any(u.is_commander for u in combat)
+
+    sacus = state.get_subcommanders()
+    assert len(sacus) == 1
+    assert sacus[0].id == 5
+
+    radars = state.get_radars()
+    assert len(radars) == 1
+    assert radars[0].id == 6
+
+    exps = state.get_experimentals()
+    assert len(exps) == 1
+    assert exps[0].id == 7
 
     # Test Mass Spots Queries
     nearest_mex = state.get_nearest_free_mex(acu.position)
@@ -122,22 +179,22 @@ def test_gamestate_and_unit_queries():
 
     # Test Fluent Commands
     acu.move((150.0, 0.0, 160.0))
+    acu.enhance("CoolingUpgrade")
     engineers[0].build("mex_t1", nearest_mex.position)
     factories[0].queue("tank_t1", count=5)
     combat[0].attack(enemies[0])
+    client.set_army(2)
 
     # Check that commands accumulated in client buffer
     cmds = client.buffer.flush()
-    assert len(cmds) == 4
+    assert len(cmds) == 6
     assert cmds[0]["type"] == "move"
-    assert cmds[0]["units"] == [1]
-    assert cmds[1]["type"] == "build_mobile"
-    assert cmds[1]["builder"] == 2
-    assert cmds[1]["blueprint"] == "urb1102"
-    assert cmds[2]["type"] == "build_factory"
-    assert cmds[2]["factory"] == 3
-    assert cmds[2]["blueprint"] == "url0107"
-    assert cmds[2]["count"] == 5
-    assert cmds[3]["type"] == "attack"
-    assert cmds[3]["units"] == [4]
-    assert cmds[3]["target_id"] == 99
+    assert cmds[1]["type"] == "enhance"
+    assert cmds[1]["unit"] == 1
+    assert cmds[1]["enhancement"] == "CoolingUpgrade"
+    assert cmds[2]["type"] == "build_mobile"
+    assert cmds[2]["builder"] == 2
+    assert cmds[3]["type"] == "build_factory"
+    assert cmds[4]["type"] == "attack"
+    assert cmds[5]["type"] == "set_army"
+    assert cmds[5]["army"] == 2

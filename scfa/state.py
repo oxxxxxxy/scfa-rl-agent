@@ -59,6 +59,12 @@ class Unit:
     max_health: float
     fraction_complete: float = 1.0
     tags: List[str] = field(default_factory=list)
+    mass_in: float = 0.0
+    mass_out: float = 0.0
+    energy_in: float = 0.0
+    energy_out: float = 0.0
+    build_rate: float = 0.0
+    fuel: float = 1.0
     _client: Optional[Any] = field(default=None, repr=False)
 
     @property
@@ -78,6 +84,10 @@ class Unit:
         return "COMMANDER" in self.tags
 
     @property
+    def is_subcommander(self) -> bool:
+        return "SUBCOMMANDER" in self.tags
+
+    @property
     def is_engineer(self) -> bool:
         return "ENGINEER" in self.tags
 
@@ -94,12 +104,33 @@ class Unit:
         return "AIR" in self.tags
 
     @property
+    def is_naval(self) -> bool:
+        return "NAVAL" in self.tags
+
+    @property
     def is_structure(self) -> bool:
         return "STRUCTURE" in self.tags
 
     @property
+    def is_shield(self) -> bool:
+        return "SHIELD" in self.tags
+
+    @property
+    def is_radar(self) -> bool:
+        return "RADAR" in self.tags or "OMNI" in self.tags
+
+    @property
+    def is_experimental(self) -> bool:
+        return "EXPERIMENTAL" in self.tags
+
+    @property
     def is_combat(self) -> bool:
-        return ("DIRECTFIRE" in self.tags or "ANTIAIR" in self.tags) and not self.is_structure and not self.is_commander
+        return (
+            ("DIRECTFIRE" in self.tags or "ANTIAIR" in self.tags)
+            and not self.is_structure
+            and not self.is_commander
+            and not self.is_subcommander
+        )
 
     # Unit Fluent Actions
     def move(self, target: Tuple[float, float, float]) -> None:
@@ -140,6 +171,10 @@ class Unit:
         if self._client:
             self._client.upgrade(self.id, blueprint_id)
 
+    def enhance(self, enhancement_name: str) -> None:
+        if self._client:
+            self._client.enhance(self.id, enhancement_name)
+
     def reclaim(self, target: Optional[Tuple[float, float, float]] = None, target_id: Optional[int] = None) -> None:
         if self._client:
             self._client.reclaim(self.id, target=target, target_id=target_id)
@@ -152,6 +187,7 @@ class Unit:
 @dataclass
 class GameState:
     step: int
+    army_index: int
     time: float
     tick: int
     speed: float
@@ -200,6 +236,12 @@ class GameState:
                 max_health=float(u.get("max_hp", 1.0)),
                 fraction_complete=float(u.get("fraction", 1.0)),
                 tags=u.get("tags", []),
+                mass_in=float(u.get("mass_in", 0.0)),
+                mass_out=float(u.get("mass_out", 0.0)),
+                energy_in=float(u.get("energy_in", 0.0)),
+                energy_out=float(u.get("energy_out", 0.0)),
+                build_rate=float(u.get("build_rate", 0.0)),
+                fuel=float(u.get("fuel", 1.0)),
                 _client=client
             )
 
@@ -229,6 +271,7 @@ class GameState:
         map_info = data.get("map", {})
         return cls(
             step=int(data.get("step", 0)),
+            army_index=int(data.get("army_index", 1)),
             time=float(data.get("game_time", 0.0)),
             tick=int(data.get("game_tick", 0)),
             speed=float(data.get("game_speed", 1.0)),
@@ -249,6 +292,10 @@ class GameState:
                 return u
         return None
 
+    def get_subcommanders(self) -> List[Unit]:
+        """Returns all Support Commander (SACU) units."""
+        return [u for u in self.units.values() if u.is_subcommander and u.is_alive]
+
     def get_engineers(self) -> List[Unit]:
         """Returns all friendly engineer units."""
         return [u for u in self.units.values() if u.is_engineer and u.is_alive]
@@ -261,11 +308,19 @@ class GameState:
         return factories
 
     def get_combat_units(self, category: Optional[str] = None) -> List[Unit]:
-        """Returns all mobile combat units, optionally filtered by 'LAND' or 'AIR'."""
+        """Returns all mobile combat units, optionally filtered by 'LAND', 'AIR', 'NAVAL'."""
         units = [u for u in self.units.values() if u.is_combat and u.is_alive]
         if category:
             units = [u for u in units if category.upper() in u.tags]
         return units
+
+    def get_experimentals(self) -> List[Unit]:
+        """Returns all experimental units and structures."""
+        return [u for u in self.units.values() if u.is_experimental and u.is_alive]
+
+    def get_radars(self) -> List[Unit]:
+        """Returns all radar, sonar, and omni sensory structures."""
+        return [u for u in self.units.values() if u.is_radar and u.is_alive]
 
     def get_nearest_free_mex(self, from_pos: Tuple[float, float, float]) -> Optional[MassSpot]:
         """Finds the closest unoccupied mass deposit to a given coordinate."""
