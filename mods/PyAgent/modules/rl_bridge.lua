@@ -1,5 +1,5 @@
--- PyAgent Reinforcement Learning Bridge
--- Communicates with host Python process via Linux Shared Memory (/dev/shm)
+-- PyAgent Full Programmatic API Bridge for Supreme Commander: Forged Alliance
+-- Ultra-low latency IPC via Linux Shared Memory (/dev/shm)
 
 local ScenarioUtils = import('/lua/sim/ScenarioUtilities.lua')
 local AIUtils = import('/lua/ai/aiutilities.lua')
@@ -8,74 +8,21 @@ _G.PyAgent_Bridge = {
     Running = false,
     StepId = 0,
     SHM_DIR = "Z:/dev/shm/",
-    OBS_FILE = "Z:/dev/shm/scfa_obs.json",
-    OBS_READY = "Z:/dev/shm/scfa_obs.ready",
-    ACT_FILE = "Z:/dev/shm/scfa_action.json",
-    ACT_READY = "Z:/dev/shm/scfa_action.ready",
+    STATE_FILE = "Z:/dev/shm/scfa_state.json",
+    STATE_READY = "Z:/dev/shm/scfa_state.ready",
+    CMD_FILE = "Z:/dev/shm/scfa_commands.json",
+    CMD_READY = "Z:/dev/shm/scfa_commands.ready",
     STOP_FILE = "Z:/dev/shm/scfa_stop.flag"
 }
 
--- Faction blueprint tables
-local FactionBlueprints = {
-    -- 1: UEF
-    [1] = {
-        MEX = 'ueb1102',
-        POWER = 'ueb1101',
-        HYDRO = 'ueb1105',
-        LAND_FACTORY = 'ueb0101',
-        AIR_FACTORY = 'ueb0102',
-        PD = 'ueb2101',
-        AA = 'ueb2104',
-        LAND_SCOUT = 'uel0101',
-        LAND_TANK = 'uel0201',
-        AIR_INT = 'uea0102'
-    },
-    -- 2: Aeon
-    [2] = {
-        MEX = 'uab1102',
-        POWER = 'uab1101',
-        HYDRO = 'uab1105',
-        LAND_FACTORY = 'uab0101',
-        AIR_FACTORY = 'uab0102',
-        PD = 'uab2101',
-        AA = 'uab2104',
-        LAND_SCOUT = 'ual0101',
-        LAND_TANK = 'ual0201',
-        AIR_INT = 'uaa0102'
-    },
-    -- 3: Cybran
-    [3] = {
-        MEX = 'urb1102',
-        POWER = 'urb1101',
-        HYDRO = 'urb1105',
-        LAND_FACTORY = 'urb0101',
-        AIR_FACTORY = 'urb0102',
-        PD = 'urb2101',
-        AA = 'urb2104',
-        LAND_SCOUT = 'url0101',
-        LAND_TANK = 'url0107',
-        AIR_INT = 'ura0102'
-    },
-    -- 4: Seraphim
-    [4] = {
-        MEX = 'xsb1102',
-        POWER = 'xsb1101',
-        HYDRO = 'xsb1105',
-        LAND_FACTORY = 'xsb0101',
-        AIR_FACTORY = 'xsb0102',
-        PD = 'xsb2101',
-        AA = 'xsb2104',
-        LAND_SCOUT = 'xsl0101',
-        LAND_TANK = 'xsl0201',
-        AIR_INT = 'xsa0102'
-    }
-}
-
--- Lightweight pure Lua JSON Serializer
+-- Fast JSON Serializer for Lua
 local function SerializeJson(val)
     local t = type(val)
     if t == 'number' then
-        return tostring(val)
+        if val ~= val then return "0" end -- NaN check
+        if val == math.huge then return "999999" end
+        if val == -math.huge then return "-999999" end
+        return string.format("%.2f", val)
     elseif t == 'string' then
         return string.format("%q", val)
     elseif t == 'boolean' then
@@ -107,23 +54,6 @@ local function SerializeJson(val)
     end
 end
 
--- Simple key-value parser for action json
-local function ParseActionJson(str)
-    if not str then return nil end
-    local act = {}
-    local actionType = string.match(str, '"action"%s*:%s*(%d+)')
-    if actionType then act.action = tonumber(actionType) else act.action = 0 end
-    
-    local stepId = string.match(str, '"step"%s*:%s*(%d+)')
-    if stepId then act.step = tonumber(stepId) else act.step = 0 end
-
-    local tx, tz = string.match(str, '"target"%s*:%s*%[%s*([%d%.%-]+)%s*,%s*[%d%.%-]+%s*,%s*([%d%.%-]+)%s*%]')
-    if tx and tz then
-        act.target = { tonumber(tx), 0, tonumber(tz) }
-    end
-    return act
-end
-
 local function FileExists(path)
     local f = io.open(path, "r")
     if f then
@@ -150,233 +80,343 @@ local function WriteFile(path, content)
     return true
 end
 
--- Collect State Observation
-local function CollectObservation(aiBrain, factionIndex)
-    local obs = {
+-- Category tags helper
+local function GetUnitTags(unit)
+    local tags = {}
+    if EntityCategoryContains(categories.COMMAND, unit) then table.insert(tags, "COMMANDER") end
+    if EntityCategoryContains(categories.ENGINEER, unit) then table.insert(tags, "ENGINEER") end
+    if EntityCategoryContains(categories.FACTORY, unit) then table.insert(tags, "FACTORY") end
+    if EntityCategoryContains(categories.LAND, unit) then table.insert(tags, "LAND") end
+    if EntityCategoryContains(categories.AIR, unit) then table.insert(tags, "AIR") end
+    if EntityCategoryContains(categories.NAVAL, unit) then table.insert(tags, "NAVAL") end
+    if EntityCategoryContains(categories.STRUCTURE, unit) then table.insert(tags, "STRUCTURE") end
+    if EntityCategoryContains(categories.MASSEXTRACTION, unit) then table.insert(tags, "MASSEXTRACTION") end
+    if EntityCategoryContains(categories.ENERGYPRODUCTION, unit) then table.insert(tags, "ENERGYPRODUCTION") end
+    if EntityCategoryContains(categories.DIRECTFIRE, unit) then table.insert(tags, "DIRECTFIRE") end
+    if EntityCategoryContains(categories.ANTIAIR, unit) then table.insert(tags, "ANTIAIR") end
+    if EntityCategoryContains(categories.DEFENSE, unit) then table.insert(tags, "DEFENSE") end
+    if EntityCategoryContains(categories.TECH1, unit) then table.insert(tags, "TECH1") end
+    if EntityCategoryContains(categories.TECH2, unit) then table.insert(tags, "TECH2") end
+    if EntityCategoryContains(categories.TECH3, unit) then table.insert(tags, "TECH3") end
+    if EntityCategoryContains(categories.EXPERIMENTAL, unit) then table.insert(tags, "EXPERIMENTAL") end
+    return tags
+end
+
+-- Collect comprehensive game state
+local function CollectFullState(aiBrain)
+    local mapWidth = ScenarioInfo.size[1] or 512
+    local mapHeight = ScenarioInfo.size[2] or 512
+
+    local state = {
         step = _G.PyAgent_Bridge.StepId,
         game_time = GetGameTimeSeconds(),
         game_tick = GetGameTick(),
+        game_speed = GetGameSpeed(),
         is_over = IsGameOver(),
-        economy = {},
-        acu = { alive = false },
-        counts = {
-            engineers = 0,
-            factories_land = 0,
-            factories_air = 0,
-            combat_land = 0,
-            combat_air = 0,
-            energy_prod = 0,
-            mex = 0
+        map = {
+            width = mapWidth,
+            height = mapHeight
         },
-        enemy_threat = {}
+        economy = {
+            mass = {
+                stored = aiBrain:GetEconomyStored('MASS'),
+                capacity = aiBrain:GetEconomyStorage('MASS'),
+                income = aiBrain:GetEconomyIncome('MASS'),
+                usage = aiBrain:GetEconomyUsage('MASS'),
+                requested = aiBrain:GetEconomyRequested('MASS'),
+                trend = aiBrain:GetEconomyTrend('MASS')
+            },
+            energy = {
+                stored = aiBrain:GetEconomyStored('ENERGY'),
+                capacity = aiBrain:GetEconomyStorage('ENERGY'),
+                income = aiBrain:GetEconomyIncome('ENERGY'),
+                usage = aiBrain:GetEconomyUsage('ENERGY'),
+                requested = aiBrain:GetEconomyRequested('ENERGY'),
+                trend = aiBrain:GetEconomyTrend('ENERGY')
+            }
+        },
+        units = {},
+        enemies = {},
+        mass_spots = {}
     }
 
-    -- Economy
-    obs.economy.mass_stored = aiBrain:GetEconomyStored('MASS')
-    obs.economy.mass_income = aiBrain:GetEconomyIncome('MASS')
-    obs.economy.mass_usage = aiBrain:GetEconomyUsage('MASS')
-    obs.economy.mass_trend = aiBrain:GetEconomyTrend('MASS')
-
-    obs.economy.energy_stored = aiBrain:GetEconomyStored('ENERGY')
-    obs.economy.energy_income = aiBrain:GetEconomyIncome('ENERGY')
-    obs.economy.energy_usage = aiBrain:GetEconomyUsage('ENERGY')
-    obs.economy.energy_trend = aiBrain:GetEconomyTrend('ENERGY')
-
-    -- ACU
-    local commanders = aiBrain:GetListOfUnits(categories.COMMAND, false)
-    if commanders and commanders[1] and not commanders[1]:IsDead() then
-        local acu = commanders[1]
-        local pos = acu:GetPosition()
-        obs.acu.alive = true
-        obs.acu.health = acu:GetHealth()
-        obs.acu.max_health = acu:GetMaxHealth()
-        obs.acu.pos = { math.floor(pos[1]), math.floor(pos[2]), math.floor(pos[3]) }
-        obs.acu.fraction = acu:GetFractionComplete()
+    -- Friendly Units
+    local myUnits = aiBrain:GetListOfUnits(categories.ALLUNITS, false)
+    if myUnits then
+        for _, u in ipairs(myUnits) do
+            if not u:IsDead() then
+                local pos = u:GetPosition()
+                local bp = u:GetBlueprint()
+                table.insert(state.units, {
+                    id = u:GetEntityId(),
+                    bp = bp.BlueprintId,
+                    pos = { math.floor(pos[1]*10)/10, math.floor(pos[2]*10)/10, math.floor(pos[3]*10)/10 },
+                    hp = u:GetHealth(),
+                    max_hp = u:GetMaxHealth(),
+                    fraction = u:GetFractionComplete(),
+                    tags = GetUnitTags(u)
+                })
+            end
+        end
     end
 
-    -- Units Counts
-    local engs = aiBrain:GetListOfUnits(categories.ENGINEER, false)
-    obs.counts.engineers = engs and table.getn(engs) or 0
-
-    local lfac = aiBrain:GetListOfUnits(categories.LAND * categories.FACTORY, false)
-    obs.counts.factories_land = lfac and table.getn(lfac) or 0
-
-    local afac = aiBrain:GetListOfUnits(categories.AIR * categories.FACTORY, false)
-    obs.counts.factories_air = afac and table.getn(afac) or 0
-
-    local lcomb = aiBrain:GetListOfUnits(categories.LAND * categories.MOBILE * categories.DIRECTFIRE, false)
-    obs.counts.combat_land = lcomb and table.getn(lcomb) or 0
-
-    local acomb = aiBrain:GetListOfUnits(categories.AIR * categories.MOBILE * categories.ANTIAIR, false)
-    obs.counts.combat_air = acomb and table.getn(acomb) or 0
-
-    local mexes = aiBrain:GetListOfUnits(categories.MASSEXTRACTION, false)
-    obs.counts.mex = mexes and table.getn(mexes) or 0
-
-    local pgens = aiBrain:GetListOfUnits(categories.ENERGYPRODUCTION, false)
-    obs.counts.energy_prod = pgens and table.getn(pgens) or 0
-
-    -- Highest enemy threat position
-    local threatPos = aiBrain:GetHighestThreatPosition(1, true)
-    if threatPos then
-        obs.enemy_threat.pos = { math.floor(threatPos[1]), 0, math.floor(threatPos[3]) }
+    -- Spotted / Visible Enemy Units
+    local center = { mapWidth / 2, 0, mapHeight / 2 }
+    local radius = math.max(mapWidth, mapHeight) * 1.5
+    local enemyUnits = aiBrain:GetUnitsAroundPoint(categories.ALLUNITS, center, radius, 'Enemy')
+    if enemyUnits then
+        for _, u in ipairs(enemyUnits) do
+            if not u:IsDead() then
+                local pos = u:GetPosition()
+                local bp = u:GetBlueprint()
+                table.insert(state.enemies, {
+                    id = u:GetEntityId(),
+                    bp = bp.BlueprintId,
+                    pos = { math.floor(pos[1]*10)/10, math.floor(pos[2]*10)/10, math.floor(pos[3]*10)/10 },
+                    hp = u:GetHealth(),
+                    max_hp = u:GetMaxHealth(),
+                    tags = GetUnitTags(u)
+                })
+            end
+        end
     end
 
-    return obs
+    -- Mass Deposits & Occupancy
+    local massPoints = aiBrain:GetDepositPoints('Mass')
+    if massPoints then
+        for _, mp in ipairs(massPoints) do
+            local allies = aiBrain:GetUnitsAroundPoint(categories.MASSEXTRACTION, mp, 4, 'Ally')
+            local enemies = aiBrain:GetUnitsAroundPoint(categories.MASSEXTRACTION, mp, 4, 'Enemy')
+            local occ = "free"
+            if allies and table.getn(allies) > 0 then
+                occ = "ally"
+            elseif enemies and table.getn(enemies) > 0 then
+                occ = "enemy"
+            end
+            table.insert(state.mass_spots, {
+                x = math.floor(mp[1]*10)/10,
+                z = math.floor(mp[3]*10)/10,
+                status = occ
+            })
+        end
+    end
+
+    return state
 end
 
--- Execute Agent Action
-local function ExecuteAction(aiBrain, factionIndex, act)
-    if not act or act.action == 0 then return end
-    local bps = FactionBlueprints[factionIndex] or FactionBlueprints[3]
+-- Resolve list of unit objects from IDs
+local function ResolveUnits(unitIds)
+    local list = {}
+    if type(unitIds) == "table" then
+        for _, id in ipairs(unitIds) do
+            local u = GetUnitById(id)
+            if u and not u:IsDead() then
+                table.insert(list, u)
+            end
+        end
+    elseif type(unitIds) == "number" then
+        local u = GetUnitById(unitIds)
+        if u and not u:IsDead() then
+            table.insert(list, u)
+        end
+    end
+    return list
+end
 
-    local idleEngs = aiBrain:GetListOfUnits(categories.ENGINEER, true) -- only idle
-    local allEngs = aiBrain:GetListOfUnits(categories.ENGINEER, false)
-    local eng = (idleEngs and idleEngs[1]) or (allEngs and allEngs[1])
+-- Execute a single command
+local function ExecuteCommand(cmd)
+    if not cmd or not cmd.type then return end
+    local ctype = cmd.type
 
-    local commanders = aiBrain:GetListOfUnits(categories.COMMAND, false)
-    local acu = commanders and commanders[1] and not commanders[1]:IsDead() and commanders[1]
+    -- Move
+    if ctype == "move" and cmd.units and cmd.target then
+        local units = ResolveUnits(cmd.units)
+        if table.getn(units) > 0 then
+            IssueMove(units, { cmd.target[1], cmd.target[2] or 0, cmd.target[3] })
+        end
 
-    local builder = eng or acu
-    if not builder then return end
+    -- Attack Move
+    elseif ctype == "attack_move" and cmd.units and cmd.target then
+        local units = ResolveUnits(cmd.units)
+        if table.getn(units) > 0 then
+            IssueAggressiveMove(units, { cmd.target[1], cmd.target[2] or 0, cmd.target[3] })
+        end
 
-    local bpos = builder:GetPosition()
+    -- Attack Unit
+    elseif ctype == "attack" and cmd.units and cmd.target_id then
+        local units = ResolveUnits(cmd.units)
+        local target = GetUnitById(cmd.target_id)
+        if table.getn(units) > 0 and target and not target:IsDead() then
+            IssueAttack(units, target)
+        end
 
-    -- Action 1: Build Mass Extractor at nearest free spot
-    if act.action == 1 and bps.MEX then
-        local mexPositions = aiBrain:GetDepositPoints('Mass')
-        if mexPositions then
-            local bestPos = nil
-            local bestDist = 999999
-            for _, mp in mexPositions do
-                local dist = VDist2(bpos[1], bpos[3], mp[1], mp[3])
-                local existing = aiBrain:GetUnitsAroundPoint(categories.MASSEXTRACTION, mp, 4, 'Ally')
-                if table.getn(existing) == 0 and dist < bestDist then
-                    bestDist = dist
-                    bestPos = mp
+    -- Guard / Assist
+    elseif ctype == "guard" and cmd.units and cmd.target_id then
+        local units = ResolveUnits(cmd.units)
+        local target = GetUnitById(cmd.target_id)
+        if table.getn(units) > 0 and target and not target:IsDead() then
+            IssueGuard(units, target)
+        end
+
+    -- Patrol
+    elseif ctype == "patrol" and cmd.units and cmd.target then
+        local units = ResolveUnits(cmd.units)
+        if table.getn(units) > 0 then
+            IssuePatrol(units, { cmd.target[1], cmd.target[2] or 0, cmd.target[3] })
+        end
+
+    -- Stop
+    elseif ctype == "stop" and cmd.units then
+        local units = ResolveUnits(cmd.units)
+        if table.getn(units) > 0 then
+            IssueStop(units)
+        end
+
+    -- Build Mobile (Engineer / ACU)
+    elseif ctype == "build_mobile" and cmd.builder and cmd.blueprint and cmd.target then
+        local builder = GetUnitById(cmd.builder)
+        if builder and not builder:IsDead() then
+            IssueBuildMobile(builder, { cmd.target[1], cmd.target[2] or 0, cmd.target[3] }, cmd.blueprint, {})
+        end
+
+    -- Build Factory (Produce units)
+    elseif ctype == "build_factory" and cmd.factory and cmd.blueprint then
+        local factory = GetUnitById(cmd.factory)
+        if factory and not factory:IsDead() then
+            local count = cmd.count or 1
+            IssueBuildFactory(factory, cmd.blueprint, count)
+        end
+
+    -- Upgrade
+    elseif ctype == "upgrade" and cmd.unit and cmd.blueprint then
+        local unit = GetUnitById(cmd.unit)
+        if unit and not unit:IsDead() then
+            IssueUpgrade(unit, cmd.blueprint)
+        end
+
+    -- Reclaim Target or Area
+    elseif ctype == "reclaim" and cmd.builder then
+        local builder = GetUnitById(cmd.builder)
+        if builder and not builder:IsDead() then
+            if cmd.target_id then
+                local target = GetEntityById(cmd.target_id)
+                if target then IssueReclaim(builder, target) end
+            elseif cmd.target then
+                local pos = cmd.target
+                local reclaimables = GetReclaimablesInRect(pos[1]-15, pos[3]-15, pos[1]+15, pos[3]+15)
+                if reclaimables and reclaimables[1] then
+                    IssueReclaim(builder, reclaimables[1])
                 end
             end
-            if bestPos then
-                IssueBuildMobile(builder, {bestPos[1], 0, bestPos[3]}, bps.MEX, {})
-            end
         end
 
-    -- Action 2: Build Power Generator
-    elseif act.action == 2 and bps.POWER then
-        local buildPos = { bpos[1] + 5, 0, bpos[3] + 5 }
-        IssueBuildMobile(builder, buildPos, bps.POWER, {})
-
-    -- Action 3: Build Land Factory
-    elseif act.action == 3 and bps.LAND_FACTORY then
-        local buildPos = { bpos[1] - 8, 0, bpos[3] - 8 }
-        IssueBuildMobile(builder, buildPos, bps.LAND_FACTORY, {})
-
-    -- Action 4: Build Air Factory
-    elseif act.action == 4 and bps.AIR_FACTORY then
-        local buildPos = { bpos[1] + 8, 0, bpos[3] - 8 }
-        IssueBuildMobile(builder, buildPos, bps.AIR_FACTORY, {})
-
-    -- Action 5: Build Point Defense
-    elseif act.action == 5 and bps.PD then
-        local buildPos = { bpos[1] + 12, 0, bpos[3] + 12 }
-        IssueBuildMobile(builder, buildPos, bps.PD, {})
-
-    -- Action 6: Queue Land Scout
-    elseif act.action == 6 and bps.LAND_SCOUT then
-        local factories = aiBrain:GetListOfUnits(categories.LAND * categories.FACTORY, false)
-        if factories and factories[1] then
-            IssueBuildFactory(factories[1], bps.LAND_SCOUT, 1)
+    -- Overcharge
+    elseif ctype == "overcharge" and cmd.commander and cmd.target then
+        local acu = GetUnitById(cmd.commander)
+        if acu and not acu:IsDead() then
+            IssueOverCharge(acu, { cmd.target[1], cmd.target[2] or 0, cmd.target[3] })
         end
 
-    -- Action 7: Queue Land Tank
-    elseif act.action == 7 and bps.LAND_TANK then
-        local factories = aiBrain:GetListOfUnits(categories.LAND * categories.FACTORY, false)
-        if factories and factories[1] then
-            IssueBuildFactory(factories[1], bps.LAND_TANK, 2)
-        end
-
-    -- Action 8: Queue Air Interceptor
-    elseif act.action == 8 and bps.AIR_INT then
-        local factories = aiBrain:GetListOfUnits(categories.AIR * categories.FACTORY, false)
-        if factories and factories[1] then
-            IssueBuildFactory(factories[1], bps.AIR_INT, 1)
-        end
-
-    -- Action 9: Attack Enemy Base / High Threat
-    elseif act.action == 9 then
-        local combatUnits = aiBrain:GetListOfUnits(categories.MOBILE * categories.LAND * categories.DIRECTFIRE, false)
-        if combatUnits and table.getn(combatUnits) > 0 then
-            local targetPos = act.target or aiBrain:GetHighestThreatPosition(1, true)
-            if targetPos then
-                IssueAggressiveMove(combatUnits, targetPos)
-            end
-        end
-
-    -- Action 10: Defend ACU
-    elseif act.action == 10 and acu then
-        local combatUnits = aiBrain:GetListOfUnits(categories.MOBILE * categories.LAND * categories.DIRECTFIRE, false)
-        if combatUnits and table.getn(combatUnits) > 0 then
-            IssueGuard(combatUnits, acu)
-        end
-
-    -- Action 11: Reclaim Nearby
-    elseif act.action == 11 and builder then
-        local pos = builder:GetPosition()
-        local reclaimables = GetReclaimablesInRect(pos[1]-25, pos[3]-25, pos[1]+25, pos[3]+25)
-        if reclaimables and reclaimables[1] then
-            IssueReclaim(builder, reclaimables[1])
-        end
+    -- Game Speed
+    elseif ctype == "set_speed" and cmd.speed then
+        SetGameSpeed(tonumber(cmd.speed))
     end
 end
 
--- Main RL Loop
+-- Lightweight Command Batch Parser
+-- Parses JSON commands list like: [{"type":"move","units":[1,2],"target":[10,0,20]}]
+local function ExecuteCommandsJson(str)
+    if not str then return end
+    -- Find individual JSON objects in the array
+    for obj in string.gfind(str, '(%{[^%}%{]+%})') do
+        local cmd = {}
+        cmd.type = string.match(obj, '"type"%s*:%s*"([^"]+)"')
+        
+        local bp = string.match(obj, '"blueprint"%s*:%s*"([^"]+)"')
+        if bp then cmd.blueprint = bp end
+
+        local bldr = string.match(obj, '"builder"%s*:%s*(%d+)')
+        if bldr then cmd.builder = tonumber(bldr) end
+
+        local fct = string.match(obj, '"factory"%s*:%s*(%d+)')
+        if fct then cmd.factory = tonumber(fct) end
+
+        local unt = string.match(obj, '"unit"%s*:%s*(%d+)')
+        if unt then cmd.unit = tonumber(unt) end
+
+        local tid = string.match(obj, '"target_id"%s*:%s*(%d+)')
+        if tid then cmd.target_id = tonumber(tid) end
+
+        local cnt = string.match(obj, '"count"%s*:%s*(%d+)')
+        if cnt then cmd.count = tonumber(cnt) end
+
+        local spd = string.match(obj, '"speed"%s*:%s*(%d+)')
+        if spd then cmd.speed = tonumber(spd) end
+
+        -- Target coordinates [x, y, z]
+        local tx, tz = string.match(obj, '"target"%s*:%s*%[%s*([%d%.%-]+)%s*,%s*[%d%.%-]+%s*,%s*([%d%.%-]+)%s*%]')
+        if tx and tz then
+            cmd.target = { tonumber(tx), 0, tonumber(tz) }
+        end
+
+        -- Units array: "units": [1, 2, 3]
+        local unitsPart = string.match(obj, '"units"%s*:%s*%[([^%]]+)%]')
+        if unitsPart then
+            cmd.units = {}
+            for uid in string.gfind(unitsPart, '(%d+)') do
+                table.insert(cmd.units, tonumber(uid))
+            end
+        end
+
+        ExecuteCommand(cmd)
+    end
+end
+
+-- Main Sim Hook Loop
 function _G.PyAgent_Bridge.Start()
     if _G.PyAgent_Bridge.Running then return end
     _G.PyAgent_Bridge.Running = true
 
-    LOG("PyAgent: Bridge loop entered")
-    SetGameSpeed(10) -- Accelerated 10x speed
+    LOG("PyAgent: Full API Bridge starting...")
+    SetGameSpeed(10)
 
     local self = _G.PyAgent_Bridge
-    -- Find our army (Army 1)
-    local aiBrain = GetArmyBrain(1)
-    local factionIndex = aiBrain:GetFactionIndex()
+    local aiBrain = GetArmyBrain(1) -- Default Player / Bot Army 1
 
-    -- Initial delay for landing blast
+    -- Wait 30 ticks for ACU landing animation to finish
     WaitTicks(30)
 
     while not IsGameOver() and not FileExists(self.STOP_FILE) do
         self.StepId = self.StepId + 1
 
-        -- 1. Gather observation
-        local obs = CollectObservation(aiBrain, factionIndex)
-        local obsJson = SerializeJson(obs)
+        -- 1. Harvest complete state
+        local state = CollectFullState(aiBrain)
+        local stateJson = SerializeJson(state)
 
-        -- 2. Write observation to shared memory
-        WriteFile(self.OBS_FILE, obsJson)
-        WriteFile(self.OBS_READY, tostring(self.StepId))
+        -- 2. Publish state to /dev/shm
+        WriteFile(self.STATE_FILE, stateJson)
+        WriteFile(self.STATE_READY, tostring(self.StepId))
 
-        -- 3. Wait for Python action (with timeout of ~50 sim ticks = 5 sec)
+        -- 3. Wait for Python commands handshake (up to 5 seconds timeout)
         local waitCount = 0
-        while not FileExists(self.ACT_READY) and waitCount < 50 do
+        while not FileExists(self.CMD_READY) and waitCount < 50 and not FileExists(self.STOP_FILE) do
             WaitTicks(1)
             waitCount = waitCount + 1
         end
 
-        -- 4. Process Action if ready
-        if FileExists(self.ACT_READY) then
-            local actContent = ReadFile(self.ACT_FILE)
-            if actContent then
-                local act = ParseActionJson(actContent)
-                ExecuteAction(aiBrain, factionIndex, act)
+        -- 4. Process incoming commands
+        if FileExists(self.CMD_READY) then
+            local cmdJson = ReadFile(self.CMD_FILE)
+            if cmdJson then
+                ExecuteCommandsJson(cmdJson)
             end
-            os.remove(self.ACT_READY)
+            os.remove(self.CMD_READY)
         end
 
-        -- Step interval (10 ticks = 1 game second)
+        -- Step advance (10 sim ticks = 1 game second)
         WaitTicks(10)
     end
 
-    LOG("PyAgent: Match completed or stopped")
+    LOG("PyAgent: Bridge finished session.")
     _G.PyAgent_Bridge.Running = false
 end
