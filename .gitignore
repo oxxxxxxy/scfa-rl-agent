@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+checkpoints/
+logs/
+.venv/
+env/
+venv/
+*.tmp
+scfa_obs.json*
+scfa_action.json*
+scfa_stop.flag*

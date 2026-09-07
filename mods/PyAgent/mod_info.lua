@@ -1,0 +1,17 @@
+name = "PyAgent RL Interface"
+version = 1
+uid = "pyagent-rl-interface-v1"
+copyright = "2026"
+description = "Programmatic interface and observation/action bridge for Python Reinforcement Learning."
+author = "DeepMind & pyot"
+icon = ""
+url = "https://github.com/oxxxxxxy/scfa-rl-agent"
+selectable = true
+enabled = true
+exclusive = false
+ui_only = false
+requires = {}
+requiresNames = {}
+conflicts = {}
+before = {}
+after = {}
